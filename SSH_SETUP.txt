@@ -1,0 +1,38 @@
+GITHUB SSH SETUP - COPY & PASTE INSTRUCTIONS
+
+1. Your SSH Key (copy the entire line below):
+─────────────────────────────────────────────────────────
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAOaGYrrXjBbTmoEvetGIxLkHrcz3vr+xCbQw0+ riteshbagal@github.com
+─────────────────────────────────────────────────────────
+
+2. STEPS TO COMPLETE:
+
+   a) Open: https://github.com/settings/keys
+   
+   b) Click "New SSH key" button
+   
+   c) Paste the SSH key above into the "Key" field
+   
+   d) Title: "MacBook SSH" (or any name)
+   
+   e) Click "Add SSH key"
+   
+   f) Verify in terminal:
+      ssh -T git@github.com
+      (You should see: "Hi riteshbagal! You've successfully authenticated")
+   
+   g) Update git remote to use SSH:
+      git remote set-url origin git@github.com:riteshbagal/myproject.git
+   
+   h) Push your code:
+      git push origin main
+
+3. THAT'S IT! Your code will upload to GitHub ✅
+
+═════════════════════════════════════════════════════════════════════════
+
+COMMANDS TO RUN AFTER ADDING SSH KEY:
+
+ssh -T git@github.com
+git remote set-url origin git@github.com:riteshbagal/myproject.git
+git push origin main

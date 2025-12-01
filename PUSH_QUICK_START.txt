@@ -1,0 +1,30 @@
+QUICK PUSH - JUST 3 COMMANDS
+
+Your SSH Key (copy entire line):
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAOaGYrrXjViv3jBbTmoEvetGIxLkHrcz3vr+xCbQw0+ riteshbagal@github.com
+
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: Add SSH Key to GitHub
+→ Open: https://github.com/settings/keys
+→ Click "New SSH key"
+→ Title: MacBook SSH
+→ Paste the SSH key above
+→ Click "Add SSH key"
+
+STEP 2: Verify SSH Works
+Run in terminal:
+  ssh -T git@github.com
+
+Should show:
+  Hi riteshbagal! You've successfully authenticated
+
+STEP 3: Push to GitHub
+Run in terminal (3 commands):
+  git remote set-url origin git@github.com:riteshbagal/myproject.git
+  git remote -v
+  git push origin main
+
+═══════════════════════════════════════════════════════════════════════════════
+
+DONE! ✅ Your code is on GitHub!

@@ -1,0 +1,94 @@
+"""
+Thermal-only detection function
+This should be added to server.py after the process_detection function
+"""
+
+async def process_thermal_only(image_data, camera_id: str, camera_name: str, location: dict):
+    """Process image with thermal detection ONLY (Roboflow API)"""
+    detections_list = []
+    
+    img_h, img_w = image_data.shape[:2]
+    
+    # Only run thermal detection (Roboflow)
+    if PERF_CONFIG['enable_thermal_detection']:
+        try:
+            logger.info("🌡️ Running thermal gun detection...")
+            thermal_detections, annotated_frame = await detect_thermal_guns(image_data)
+            
+            # Save annotated image
+            annotated_fname = None
+            if thermal_detections and len(thermal_detections) > 0 and annotated_frame is not None:
+                annotated_fname = f"thermal_{uuid.uuid4()}.jpg"
+                annotated_path = DETECTIONS_DIR / annotated_fname
+                cv2.imwrite(str(annotated_path), annotated_frame)
+                logger.info(f"💾 Saved thermal annotated image: {annotated_fname}")
+            
+            for thermal_det in thermal_detections:
+                thermal_det['camera_id'] = camera_id
+                thermal_det['camera_name'] = camera_name
+                thermal_det['location'] = location
+                
+                if annotated_fname:
+                    thermal_det['image_path'] = f"/detections/{annotated_fname}"
+                
+                block_hash = await add_to_blockchain(thermal_det)
+                thermal_det['blockchain_hash'] = block_hash
+                await db.detections.insert_one(thermal_det)
+                await send_twilio_alert(thermal_det)
+                thermal_det['alert_sent'] = True
+                await db.detections.update_one({"id": thermal_det['id']}, {"$set": {"alert_sent": True}})
+                detections_list.append(thermal_det)
+        except Exception as e:
+            logger.error(f"❌ Error during thermal detection: {e}", exc_info=True)
+    else:
+        logger.warning("⚠️ Thermal detection is disabled in performance config")
+    
+    return detections_list
+
+
+# Upload endpoint - add this after api_router = APIRouter(prefix="/api")
+@api_router.post("/upload")
+async def upload_with_mode(
+    file: UploadFile = File(...),
+    camera_id: str = Form("upload"),
+    camera_name: str = Form("Manual Upload"),
+    latitude: str = Form("0"),
+    longitude: str = Form("0"),
+    detection_mode: str = Form("normal")  # 'normal' or 'thermal'
+):
+    """
+    Upload endpoint that routes to different detection methods based on mode:
+    - normal: Uses both best.pt and best (1).pt models
+    - thermal: Uses Roboflow thermal detection API only
+    """
+    lat = float(latitude)
+    lng = float(longitude)
+    
+    file_path = UPLOAD_DIR / file.filename
+    async with aiofiles.open(file_path, 'wb') as f:
+        content = await file.read()
+        await f.write(content)
+    
+    image = cv2.imread(str(file_path))
+    
+    if detection_mode == "thermal":
+        # Thermal detection only - uses Roboflow
+        logger.info("🌡️ Using thermal detection mode")
+        detections = await process_thermal_only(image, camera_id, camera_name, {"lat": lat, "lng": lng})
+    else:
+        # Normal detection - uses both YOLO models
+        logger.info("🔍 Using normal detection mode (both models)")
+        detections = await process_detection(image, camera_id, camera_name, {"lat": lat, "lng": lng})
+    
+    # Remove _id field for JSON serialization
+    for det in detections:
+        det.pop('_id', None)
+    
+    # Get annotated image path
+    annotated_image = None
+    for det in detections:
+        if det.get('image_path'):
+            annotated_image = det.get('image_path')
+            break
+    
+    return {"detections": detections, "annotated_image": annotated_image}
