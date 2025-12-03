@@ -6,15 +6,17 @@ import Dashboard from "./pages/Dashboard";
 import MapView from "./pages/MapView";
 import Detections from "./pages/Detections";
 import Upload from "./pages/Upload";
-import Blockchain from "./pages/Blockchain";
+
 import LiveMonitoring from "./pages/LiveMonitoring";
 import Cameras from "./pages/Cameras";
 import Settings from "./pages/Settings";
 import Analytics from "./pages/Analytics";
+import AdminVerification from "./pages/AdminVerification";
 import { Toaster } from "react-hot-toast";
 import {
   Shield, Map, Upload as UploadIcon, Link2, AlertCircle,
-  Video, Camera, BarChart3, Settings as SettingsIcon, ChevronLeft, ChevronRight
+  Video, Camera, BarChart3, Settings as SettingsIcon, ChevronLeft, ChevronRight,
+  CheckCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -24,6 +26,7 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000"
 function SidebarNavigation() {
   const location = useLocation();
   const [detectionCount, setDetectionCount] = useState(0);
+  const [pendingVerifications, setPendingVerifications] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
@@ -31,13 +34,17 @@ function SidebarNavigation() {
       try {
         const response = await axios.get(`${BACKEND_URL}/api/detections?limit=5`);
         setDetectionCount(response.data.length);
+
+        // Fetch pending verifications count
+        const verifyResponse = await axios.get(`${BACKEND_URL}/api/verification-stats`);
+        setPendingVerifications(verifyResponse.data.pending || 0);
       } catch (error) {
         console.error("Error fetching notifications:", error);
       }
     };
 
     fetchNotifications();
-    const interval = setInterval(fetchNotifications, 10000);
+    const interval = setInterval(fetchNotifications, 30000); // Reduced frequency to 30s
     return () => clearInterval(interval);
   }, []);
 
@@ -45,11 +52,12 @@ function SidebarNavigation() {
     { path: "/", label: "Dashboard", icon: Shield },
     { path: "/live", label: "Live Monitor", icon: Video },
     { path: "/cameras", label: "Cameras", icon: Camera },
+    { path: "/admin-verify", label: "Admin Verify", icon: CheckCircle, badge: pendingVerifications },
     { path: "/map", label: "Map View", icon: Map },
     { path: "/detections", label: "Detections", icon: AlertCircle, badge: detectionCount },
     { path: "/analytics", label: "Analytics", icon: BarChart3 },
     { path: "/upload", label: "Upload", icon: UploadIcon },
-    { path: "/blockchain", label: "Blockchain", icon: Link2 },
+
     { path: "/settings", label: "Settings", icon: SettingsIcon },
   ];
 
@@ -89,8 +97,8 @@ function SidebarNavigation() {
               key={item.path}
               to={item.path}
               className={`flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${isActive
-                  ? "bg-gradient-to-r from-red-500 to-orange-500 text-white shadow-lg"
-                  : "text-gray-700 hover:bg-gray-100"
+                ? "bg-gradient-to-r from-red-500 to-orange-500 text-white shadow-lg"
+                : "text-gray-700 hover:bg-gray-100"
                 }`}
               title={collapsed ? item.label : ""}
             >
@@ -138,10 +146,10 @@ function AppContent() {
       <div className={`flex-1 transition-all duration-300 ${sidebarCollapsed ? 'ml-20' : 'ml-64'}`}>
         <motion.div
           key={location.pathname}
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -20 }}
-          transition={{ duration: 0.3 }}
+          initial={{ opacity: 0.8 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0.8 }}
+          transition={{ duration: 0.15 }} // Reduced from 0.3s to 0.15s for faster transitions
           className="p-8 w-full"
         >
           <Routes>
@@ -149,10 +157,11 @@ function AppContent() {
             <Route path="/map" element={<MapView />} />
             <Route path="/live" element={<LiveMonitoring />} />
             <Route path="/cameras" element={<Cameras />} />
+            <Route path="/admin-verify" element={<AdminVerification />} />
             <Route path="/upload" element={<Upload />} />
             <Route path="/detections" element={<Detections />} />
             <Route path="/analytics" element={<Analytics />} />
-            <Route path="/blockchain" element={<Blockchain />} />
+
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </motion.div>
@@ -185,10 +194,14 @@ function AppContent() {
   );
 }
 
+import { MonitoringProvider } from "./context/MonitoringContext";
+
 function App() {
   return (
     <BrowserRouter>
-      <AppContent />
+      <MonitoringProvider>
+        <AppContent />
+      </MonitoringProvider>
     </BrowserRouter>
   );
 }

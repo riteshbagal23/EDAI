@@ -7,7 +7,7 @@ Adjust these settings to control CPU/GPU usage and reduce laptop heating
 # PERFORMANCE MODE
 # ============================================================================
 # Choose one: "low_power", "balanced", "high_performance"
-PERFORMANCE_MODE = "balanced"  # Changed to balanced for better performance
+PERFORMANCE_MODE = "low_power"  # Changed to low_power to reduce heating
 
 # ============================================================================
 # PERFORMANCE PROFILES
@@ -28,7 +28,7 @@ PROFILES = {
         "fps": 20,  # Increased from 15 to 20 for smoother video
         "resolution": "1280x720",
         "enable_people_counting": True,
-        "enable_thermal_detection": False,
+        "enable_thermal_detection": True,
         "process_every_n_frames": 2,  # Process every 2nd frame to reduce lag
         "weapon_confidence": 0.35,  # Lowered for better gun detection
         "jpeg_quality": 85,  # Increased quality
@@ -51,13 +51,14 @@ PROFILES = {
 # ============================================================================
 # Uncomment and modify to override profile settings
 
-# FPS = 10  # Frames per second
-# RESOLUTION = "640x480"  # Camera resolution (WIDTHxHEIGHT)
-# ENABLE_PEOPLE_COUNTING = False  # Enable/disable people counting model
-# ENABLE_THERMAL_DETECTION = False  # Enable/disable thermal gun detection
-# PROCESS_EVERY_N_FRAMES = 2  # Process every Nth frame (1 = all frames)
-# WEAPON_CONFIDENCE = 0.40  # Confidence threshold for weapon detection
-# JPEG_QUALITY = 75  # JPEG compression quality (1-100)
+# Custom settings for ZERO LAG
+FPS = 30  # Frames per second
+RESOLUTION = "640x480"  # Camera resolution (WIDTHxHEIGHT)
+ENABLE_PEOPLE_COUNTING = True  # Enable/disable people counting model
+ENABLE_THERMAL_DETECTION = False  # Enable/disable thermal gun detection
+PROCESS_EVERY_N_FRAMES = 5  # Process every Nth frame (1 = all frames)
+WEAPON_CONFIDENCE = 0.40  # Confidence threshold for weapon detection
+JPEG_QUALITY = 75  # JPEG compression quality (1-100)
 
 # ============================================================================
 # HELPER FUNCTIONS

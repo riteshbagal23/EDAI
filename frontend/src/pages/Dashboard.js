@@ -14,6 +14,7 @@ const Dashboard = () => {
     blockchain: 0,
     cameras: 0,
     activeCameras: 0,
+    pendingVerifications: 0,
     recentDetections: [],
   });
   const [loading, setLoading] = useState(true);
@@ -21,20 +22,28 @@ const Dashboard = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [detections, blockchain, cameras] = await Promise.all([
+        // Use allSettled to prevent one failure from blocking all data
+        const results = await Promise.allSettled([
           axios.get(`${API}/detections`),
           axios.get(`${API}/blockchain`),
-          axios.get(`${API}/cameras`).catch(() => ({ data: { cameras: [], count: 0 } })),
+          axios.get(`${API}/cameras`),
+          axios.get(`${API}/verification-stats`),
         ]);
+
+        const detections = results[0].status === 'fulfilled' ? results[0].value : { data: [] };
+        const blockchain = results[1].status === 'fulfilled' ? results[1].value : { data: [] };
+        const cameras = results[2].status === 'fulfilled' ? results[2].value : { data: { cameras: [], count: 0 } };
+        const verifyStats = results[3].status === 'fulfilled' ? results[3].value : { data: { pending: 0 } };
 
         const activeCamerasCount = cameras.data.cameras?.filter(cam => cam.status === 'active').length || 0;
 
         setStats({
-          detections: detections.data.length,
-          blockchain: blockchain.data.length,
+          detections: detections.data.length || 0,
+          blockchain: blockchain.data.length || 0,
           cameras: cameras.data.count || 0,
           activeCameras: activeCamerasCount,
-          recentDetections: detections.data.slice(0, 5),
+          pendingVerifications: verifyStats.data.pending || 0,
+          recentDetections: detections.data.slice(0, 5) || [],
         });
         setLoading(false);
       } catch (error) {
@@ -44,7 +53,7 @@ const Dashboard = () => {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 5000);
+    const interval = setInterval(fetchData, 10000); // Increased from 5s to 10s
     return () => clearInterval(interval);
   }, []);
 
@@ -58,6 +67,16 @@ const Dashboard = () => {
       textColor: "text-red-600",
       trend: "+12.5%",
       trendUp: true,
+    },
+    {
+      title: "Pending Verifications",
+      value: stats.pendingVerifications,
+      icon: Shield,
+      color: "from-yellow-500 to-amber-500",
+      bgColor: "bg-yellow-50",
+      textColor: "text-yellow-600",
+      trend: "Needs Review",
+      trendUp: false,
     },
     {
       title: "Total Cameras",
@@ -124,7 +143,7 @@ const Dashboard = () => {
       </motion.div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
         {statCards.map((stat, index) => {
           const Icon = stat.icon;
           return (

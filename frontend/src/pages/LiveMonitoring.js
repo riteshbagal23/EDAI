@@ -10,187 +10,27 @@ import { motion } from "framer-motion";
 const BACKEND_URL = "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
 
+import { useMonitoring } from "../context/MonitoringContext";
+
 const LiveMonitoring = () => {
-  const [isMonitoring, setIsMonitoring] = useState(false);
-  const [detections, setDetections] = useState([]);
-  const [stats, setStats] = useState({
-    framesProcessed: 0,
-    threatsDetected: 0,
-    fps: 20,
-    peopleCount: 0,
-  });
-  const [emergencyContext, setEmergencyContext] = useState(null);
-  const [locationStatus, setLocationStatus] = useState("Locating...");
+  const {
+    isMonitoring,
+    stats,
+    detections,
+    startMonitoring,
+    stopMonitoring,
+    setVoiceEnabled: setGlobalVoiceEnabled,
+    emergencyContext,
+    locationStatus
+  } = useMonitoring();
+
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
-  const lastSpeechRef = useRef(0);
-  const pollIntervalRef = useRef(null);
-  const frameCountRef = useRef(0);
 
-  // Fetch location and context on mount
+  // Sync local voice state with global context
   useEffect(() => {
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        async (position) => {
-          const { latitude, longitude } = position.coords;
-          setLocationStatus("Location Found");
-          try {
-            const res = await axios.get(`${API}/emergency-context`, {
-              params: { lat: latitude, lng: longitude }
-            });
-            setEmergencyContext(res.data);
-          } catch (err) {
-            console.error("Context fetch error", err);
-          }
-        },
-        (err) => {
-          console.warn("Location error", err);
-          setLocationStatus("Location Access Denied");
-        }
-      );
-    }
-  }, []);
-
-  // Cleanup polling on unmount
-  useEffect(() => {
-    return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
-    };
-  }, []);
-
-  // Start webcam monitoring
-  const startMonitoring = async () => {
-    try {
-      const response = await axios.post(`${API}/start`);
-
-      if (response.data.status === 'started' || response.data.status === 'already_running') {
-        setIsMonitoring(true);
-        setDetections([]);
-        frameCountRef.current = 0;
-        toast.success("Webcam monitoring started");
-
-        // Start polling
-        startPolling();
-      }
-    } catch (error) {
-      console.error("Error starting monitoring:", error);
-      toast.error("Failed to start monitoring. Check if backend is running.");
-    }
-  };
-
-  // Stop webcam monitoring
-  const stopMonitoring = async () => {
-    try {
-      await axios.post(`${API}/stop`);
-      setIsMonitoring(false);
-
-      // Clear polling interval
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-
-      // Reset stats
-      setStats({
-        framesProcessed: 0,
-        threatsDetected: 0,
-        fps: 20,
-        peopleCount: 0,
-      });
-      setDetections([]);
-
-      toast.success("Monitoring stopped");
-    } catch (error) {
-      console.error("Error stopping monitoring:", error);
-      toast.error("Failed to stop monitoring");
-    }
-  };
-
-  // Optimized polling function
-  const startPolling = () => {
-    // Clear any existing interval
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-    }
-
-    // Poll every 200ms for faster updates
-    pollIntervalRef.current = setInterval(async () => {
-      try {
-        const response = await axios.get(`${API}/status`);
-        const data = response.data;
-
-        // Update stats
-        frameCountRef.current += 1;
-        setStats({
-          framesProcessed: frameCountRef.current,
-          threatsDetected: (data.guns || 0) + (data.knives || 0),
-          fps: 20,
-          peopleCount: data.people || 0,
-        });
-
-        // Update detections if threats found
-        const hasThreats = (data.guns > 0) || (data.knives > 0);
-        if (hasThreats) {
-          const newDetections = [];
-          if (data.guns > 0) {
-            newDetections.push({ detection_type: "pistol", confidence: 0.9 });
-          }
-          if (data.knives > 0) {
-            newDetections.push({ detection_type: "knife", confidence: 0.9 });
-          }
-          setDetections(newDetections);
-
-          // Alert if needed
-          if (data.alert) {
-            playAlertSound();
-            const threat = data.guns > 0 ? "Gun" : "Knife";
-            speakAlert(`Warning. ${threat} detected.`);
-          }
-        } else {
-          setDetections([]);
-        }
-      } catch (error) {
-        console.error("Polling error:", error);
-      }
-    }, 200);
-  };
-
-  // Speak alert message
-  const speakAlert = (text) => {
-    if (!voiceEnabled || Date.now() - lastSpeechRef.current < 5000) return;
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.1;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-    window.speechSynthesis.speak(utterance);
-    lastSpeechRef.current = Date.now();
-  };
-
-  // Play alert sound
-  const playAlertSound = () => {
-    try {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-
-      oscillator.frequency.value = 800;
-      oscillator.type = "sine";
-
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 0.5);
-    } catch (error) {
-      console.error("Audio error:", error);
-    }
-  };
+    setGlobalVoiceEnabled(voiceEnabled);
+  }, [voiceEnabled, setGlobalVoiceEnabled]);
 
   return (
     <div className="space-y-6" data-testid="live-monitoring-page">
@@ -340,6 +180,48 @@ const LiveMonitoring = () => {
                       </div>
                     </motion.div>
                   ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Blockchain Verification */}
+          <Card className="bg-white border-gray-200 shadow-lg">
+            <CardHeader>
+              <CardTitle className="text-gray-900 text-lg flex items-center">
+                <Shield className="h-5 w-5 mr-2 text-purple-600" />
+                Blockchain Verification
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {stats.latest_ipfs ? (
+                <div className="space-y-3">
+                  <div className="p-3 bg-purple-50 rounded-lg border border-purple-200">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-semibold text-purple-700 uppercase">
+                        {stats.latest_ipfs.threat_type} EVIDENCE
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        {new Date(stats.latest_ipfs.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <div className="text-xs text-gray-600 break-all font-mono bg-white p-2 rounded border border-purple-100 mb-2">
+                      {stats.latest_ipfs.hash}
+                    </div>
+                    <a
+                      href={stats.latest_ipfs.link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-purple-600 hover:text-purple-800 underline flex items-center"
+                    >
+                      View on IPFS <Maximize className="h-3 w-3 ml-1" />
+                    </a>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-4 text-gray-500">
+                  <p className="text-sm">No recent uploads</p>
+                  <p className="text-xs text-gray-400 mt-1">Waiting for high-confidence threats...</p>
                 </div>
               )}
             </CardContent>

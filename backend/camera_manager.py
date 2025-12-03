@@ -199,6 +199,12 @@ class CameraInstance:
                 success, frame = self.capture.read()
                 
                 if not success or frame is None:
+                    # Check if it's a file and we should loop
+                    if self.camera_type == CameraType.FILE and self.settings.get('loop', False):
+                        # logger.info(f"Looping video for camera {self.camera_id}")
+                        self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
+
                     consecutive_failures += 1
                     logger.warning(f"Failed to read frame from camera {self.camera_id} (attempt {consecutive_failures}/{max_failures})")
                     

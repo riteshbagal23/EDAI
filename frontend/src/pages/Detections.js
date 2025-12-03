@@ -2,8 +2,9 @@ import React, { useState, useEffect } from "react";
 import axios from "axios";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, MapPin, CheckCircle2, Shield } from "lucide-react";
+import { AlertTriangle, MapPin, CheckCircle2, Shield, Map, List } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import DetectionMapView from "@/components/DetectionMapView";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -14,6 +15,7 @@ const Detections = () => {
   const [selectedDetection, setSelectedDetection] = useState(null);
   const [verificationResult, setVerificationResult] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [viewMode, setViewMode] = useState('list'); // 'list' or 'map'
 
   const fetchDetections = async () => {
     try {
@@ -28,14 +30,14 @@ const Detections = () => {
 
   useEffect(() => {
     fetchDetections();
-    const interval = setInterval(fetchDetections, 10000);
+    const interval = setInterval(fetchDetections, 30000); // Reduced frequency to 30s
     return () => clearInterval(interval);
   }, []);
 
   const handleVerify = async (detection) => {
     setSelectedDetection(detection);
     setDialogOpen(true);
-    
+
     try {
       const response = await axios.get(`${API}/blockchain/verify/${detection.id}`);
       setVerificationResult(response.data);
@@ -53,10 +55,36 @@ const Detections = () => {
           </h1>
           <p className="text-slate-400 mt-2">All threat detections with blockchain verification</p>
         </div>
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-2">
-          <p className="text-sm text-slate-300">
-            Total Detections: <span className="font-bold text-red-400">{detections.length}</span>
-          </p>
+        <div className="flex items-center space-x-4">
+          {/* View Toggle */}
+          <div className="flex bg-slate-800/50 border border-slate-700 rounded-lg p-1">
+            <button
+              onClick={() => setViewMode('list')}
+              className={`flex items-center space-x-2 px-4 py-2 rounded-md transition-all ${viewMode === 'list'
+                ? 'bg-blue-500 text-white'
+                : 'text-slate-400 hover:text-white'
+                }`}
+            >
+              <List className="h-4 w-4" />
+              <span className="text-sm font-medium">List</span>
+            </button>
+            <button
+              onClick={() => setViewMode('map')}
+              className={`flex items-center space-x-2 px-4 py-2 rounded-md transition-all ${viewMode === 'map'
+                ? 'bg-blue-500 text-white'
+                : 'text-slate-400 hover:text-white'
+                }`}
+            >
+              <Map className="h-4 w-4" />
+              <span className="text-sm font-medium">Map</span>
+            </button>
+          </div>
+          {/* Detection Count */}
+          <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-2">
+            <p className="text-sm text-slate-300">
+              Total Detections: <span className="font-bold text-red-400">{detections.length}</span>
+            </p>
+          </div>
         </div>
       </div>
 
@@ -74,6 +102,8 @@ const Detections = () => {
             </div>
           </CardContent>
         </Card>
+      ) : viewMode === 'map' ? (
+        <DetectionMapView detections={detections} />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {detections.map((detection, index) => (
@@ -119,6 +149,17 @@ const Detections = () => {
                       {detection.location.lat.toFixed(4)}, {detection.location.lng.toFixed(4)}
                     </span>
                   </div>
+                  <div className="mt-2">
+                    <a
+                      href={`https://www.google.com/maps?q=${detection.location.lat},${detection.location.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center space-x-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                    >
+                      <MapPin className="h-3 w-3" />
+                      <span>View on Google Maps</span>
+                    </a>
+                  </div>
                   <div className="pt-2 border-t border-slate-700">
                     <p className="text-xs text-slate-500">
                       {new Date(detection.timestamp).toLocaleString()}
@@ -159,11 +200,10 @@ const Detections = () => {
           </DialogHeader>
           {selectedDetection && verificationResult && (
             <div className="space-y-4">
-              <div className={`p-4 rounded-lg border ${
-                verificationResult.verified
-                  ? 'bg-green-500/10 border-green-500/30'
-                  : 'bg-red-500/10 border-red-500/30'
-              }`}>
+              <div className={`p-4 rounded-lg border ${verificationResult.verified
+                ? 'bg-green-500/10 border-green-500/30'
+                : 'bg-red-500/10 border-red-500/30'
+                }`}>
                 <div className="flex items-center space-x-3">
                   {verificationResult.verified ? (
                     <CheckCircle2 className="h-6 w-6 text-green-400" />
@@ -171,9 +211,8 @@ const Detections = () => {
                     <AlertTriangle className="h-6 w-6 text-red-400" />
                   )}
                   <div>
-                    <h3 className={`font-semibold ${
-                      verificationResult.verified ? 'text-green-400' : 'text-red-400'
-                    }`}>
+                    <h3 className={`font-semibold ${verificationResult.verified ? 'text-green-400' : 'text-red-400'
+                      }`}>
                       {verificationResult.verified ? 'Verified' : 'Verification Failed'}
                     </h3>
                     <p className="text-sm text-slate-400">

@@ -74,14 +74,13 @@ const ThermalDetection = () => {
       formData.append("file", file);
 
       const [lat, lng] = selectedLocation;
-      const params = new URLSearchParams({
-        lat: String(lat),
-        lng: String(lng),
-        camera_name: "Thermal Map", // for backend context
-      });
+      formData.append("latitude", String(lat));
+      formData.append("longitude", String(lng));
+      formData.append("camera_name", "Thermal Map");
+      formData.append("detection_mode", "thermal");  // Use thermal mode
 
       const response = await axios.post(
-        `${API}/detect-thermal-guns?${params.toString()}`,
+        `${API}/upload`,
         formData,
         {
           headers: {
@@ -92,10 +91,14 @@ const ThermalDetection = () => {
 
       setResults(response.data);
 
-      if (response.data.detections && response.data.detections.length > 0) {
-        toast.error(`${response.data.thermal_guns_count} thermal gun(s) detected!`);
+      const detectionCount = response.data.detections?.length || 0;
+      const annotatedImages = response.data.annotated_images || {};
+      const imageCount = Object.keys(annotatedImages).length;
+
+      if (detectionCount > 0 || imageCount > 0) {
+        toast.error(`Detection complete! ${detectionCount} thermal detection(s), ${imageCount} model(s) detected weapons`);
       } else {
-        toast.success("Scan complete - No thermal guns detected");
+        toast.success("Scan complete - No threats detected");
       }
     } catch (err) {
       console.error("Error running thermal detection:", err);
@@ -124,10 +127,10 @@ const ThermalDetection = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-4xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
-            Thermal Detection
+            Weapon Detection Upload
           </h1>
           <p className="text-slate-400 mt-2">
-            Click on the map to choose a camera location and run thermal gun detection using Roboflow.
+            Click on the map to choose a location and upload an image for dual-model weapon detection.
           </p>
         </div>
       </div>
@@ -153,8 +156,8 @@ const ThermalDetection = () => {
                 {locLoading
                   ? "Detecting your location..."
                   : userLocation
-                  ? "You can move the marker by clicking on the map"
-                  : "Geolocation unavailable - using default map center"}
+                    ? "You can move the marker by clicking on the map"
+                    : "Geolocation unavailable - using default map center"}
               </div>
             </div>
 
@@ -281,26 +284,64 @@ const ThermalDetection = () => {
                       style={{ fontSize: "10px", lineHeight: "1" }}
                     >
                       <Thermometer className="h-2 w-2 mr-1" />
-                      {results.thermal_guns_count} Thermal Gun(s) Detected
+                      {results.detections?.length || 0} Detection(s) Found
                     </h3>
                   </div>
 
-                  {/* Annotated image */}
-                  {(results.annotated_image || (results.detections && results.detections[0]?.image_path)) && (
-                    <div className="bg-slate-900/50 border border-purple-700/50 rounded-lg p-2 mb-2">
-                      <h4
-                        className="font-semibold text-purple-300 mb-2"
-                        style={{ fontSize: "10px", lineHeight: "1" }}
-                      >
-                        Annotated Detection Image
+                  {/* Display all annotated images */}
+                  {results.annotated_images && Object.keys(results.annotated_images).length > 0 && (
+                    <div className="space-y-3">
+                      <h4 className="font-semibold text-purple-300 text-sm">
+                        Weapon Detection Results from Multiple Models
                       </h4>
-                      <img
-                        src={`${BACKEND_URL}${results.annotated_image || results.detections[0].image_path}?t=${Date.now()}`}
-                        alt="Thermal Gun Detection with Boxes"
-                        className="w-full rounded-lg border border-purple-700/30"
-                      />
+
+                      {/* best.pt Detection */}
+                      {results.annotated_images.best_pt && (
+                        <div className="bg-slate-900/50 border border-red-700/50 rounded-lg p-3">
+                          <h5 className="font-semibold text-red-300 mb-2 text-xs flex items-center">
+                            🔴 Primary Detection (best.pt @ 25%)
+                          </h5>
+                          <img
+                            src={`${BACKEND_URL}${results.annotated_images.best_pt}?t=${Date.now()}`}
+                            alt="best.pt Detection"
+                            className="w-full rounded-lg border border-red-700/30"
+                          />
+                        </div>
+                      )}
+
+                      {/* best (1).pt Detection */}
+                      {results.annotated_images.best1 && (
+                        <div className="bg-slate-900/50 border border-cyan-700/50 rounded-lg p-3">
+                          <h5 className="font-semibold text-cyan-300 mb-2 text-xs flex items-center">
+                            🟢 Verification Model (best (1).pt @ 25%)
+                          </h5>
+                          <img
+                            src={`${BACKEND_URL}${results.annotated_images.best1}?t=${Date.now()}`}
+                            alt="best (1).pt Detection"
+                            className="w-full rounded-lg border border-cyan-700/30"
+                          />
+                        </div>
+                      )}
                     </div>
                   )}
+
+                  {/* Fallback to old annotated image if no new format */}
+                  {(!results.annotated_images || Object.keys(results.annotated_images).length === 0) &&
+                    (results.annotated_image || (results.detections && results.detections[0]?.image_path)) && (
+                      <div className="bg-slate-900/50 border border-purple-700/50 rounded-lg p-2 mb-2">
+                        <h4
+                          className="font-semibold text-purple-300 mb-2"
+                          style={{ fontSize: "10px", lineHeight: "1" }}
+                        >
+                          Annotated Detection Image
+                        </h4>
+                        <img
+                          src={`${BACKEND_URL}${results.annotated_image || results.detections[0].image_path}?t=${Date.now()}`}
+                          alt="Detection with Boxes"
+                          className="w-full rounded-lg border border-purple-700/30"
+                        />
+                      </div>
+                    )}
 
                   {/* Individual detections */}
                   <div className="space-y-2 max-h-[400px] overflow-y-auto">

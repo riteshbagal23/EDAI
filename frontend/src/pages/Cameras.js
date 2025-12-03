@@ -37,9 +37,11 @@ import {
 const BACKEND_URL = "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
 
+import { useMonitoring } from "../context/MonitoringContext";
+
 const Cameras = () => {
-    const [cameras, setCameras] = useState([]);
-    const [loading, setLoading] = useState(true);
+    const { cameras, fetchCameras } = useMonitoring();
+    const [loading, setLoading] = useState(false); // No longer needed for initial load, but kept for operations
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
     const [selectedCamera, setSelectedCamera] = useState(null);
     const [isViewModalOpen, setIsViewModalOpen] = useState(false);
@@ -53,28 +55,14 @@ const Cameras = () => {
         settings: { resolution: "1280x720", fps: 30 }
     });
 
-    // Fetch cameras on mount and periodically
-    useEffect(() => {
-        fetchCameras();
-        const interval = setInterval(fetchCameras, 3000); // Refresh every 3 seconds
-        return () => clearInterval(interval);
-    }, []);
-
-    const fetchCameras = async () => {
-        try {
-            const response = await axios.get(`${API}/cameras`);
-            setCameras(response.data.cameras || []);
-            setLoading(false);
-        } catch (error) {
-            console.error("Error fetching cameras:", error);
-            toast.error("Failed to fetch cameras");
-            setLoading(false);
-        }
-    };
+    // No local fetching needed - handled by context
 
     const handleAddCamera = async () => {
+        console.log("📸 handleAddCamera called with:", newCamera);
         try {
+            console.log("🚀 Sending POST request to:", `${API}/cameras`);
             const response = await axios.post(`${API}/cameras`, newCamera);
+            console.log("✅ Camera added response:", response.data);
             toast.success(`Camera "${newCamera.name}" added successfully!`);
             setIsAddModalOpen(false);
             setNewCamera({
@@ -86,7 +74,7 @@ const Cameras = () => {
             });
             fetchCameras();
         } catch (error) {
-            console.error("Error adding camera:", error);
+            console.error("❌ Error adding camera:", error);
             toast.error(error.response?.data?.detail || "Failed to add camera");
         }
     };
@@ -362,6 +350,7 @@ const Cameras = () => {
                                     {camera.stats && (
                                         <div className="flex items-center justify-between text-xs">
                                             <span className="text-slate-500">Frames: {camera.stats.frames_processed}</span>
+                                            <span className="text-blue-400">People: {camera.stats.people}</span>
                                             <span className="text-red-400">Threats: {camera.stats.guns + camera.stats.knives}</span>
                                         </div>
                                     )}
