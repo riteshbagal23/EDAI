@@ -4,6 +4,9 @@
 SecureView Alert is an advanced real-time threat detection system that uses multiple AI models to identify weapons, violence, and suspicious activities. The system provides instant alerts and stores tamper-proof evidence using IPFS technology.
 
 ## Core Features
+uvicorn server:app --host 127.0.0.1 --port 8000 --reload
+
+
 
 ### 🔫 Multi-Model Weapon Detection
 - **Gun Detection Fusion**: Combines 4 YOLO models for maximum accuracy
@@ -301,3 +304,4 @@ For issues or questions, contact the development team.
 ---
 
 **Built with IPFS for tamper-proof, decentralized evidence storage** 🌐
+# Cloud
