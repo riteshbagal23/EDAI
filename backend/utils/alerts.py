@@ -28,7 +28,7 @@ if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
         logger.warning(f"⚠️ Failed to initialize Twilio Client: {e}")
 
 
-async def send_twilio_alert(detection_data: Dict) -> bool:
+def send_twilio_alert(detection_data: Dict) -> bool:
     """
     Send Twilio SMS alert and Voice Call for verified detections.
     
@@ -60,13 +60,11 @@ async def send_twilio_alert(detection_data: Dict) -> bool:
         maps_link = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
         
         message_body = (
-            f"🚨 SECURITY ALERT 🚨\n"
-            f"Type: {detection_type.upper()}\n"
-            f"Confidence: {confidence:.1%}\n"
+            f"SECURITY ALERT: {detection_type.upper()} detected.\n"
             f"Camera: {camera_name}\n"
             f"Time: {timestamp}\n"
             f"Location: {maps_link}\n"
-            f"Please verify immediately."
+            f"Please verify."
         )
         
         success_count = 0
@@ -76,26 +74,29 @@ async def send_twilio_alert(detection_data: Dict) -> bool:
             if not contact:
                 continue
             
-            # 1. Send SMS
-            try:
-                message = twilio_client.messages.create(
-                    body=message_body,
-                    from_=TWILIO_PHONE_NUMBER,
-                    to=contact
-                )
-                logger.info(f"📨 Twilio SMS sent to {contact}: {message.sid}")
-                success_count += 1
-            except Exception as e:
-                logger.error(f"❌ Failed to send SMS to {contact}: {e}")
+            # 1. Send SMS (Disabled per user request)
+            # try:
+            #     message = twilio_client.messages.create(
+            #         body=message_body,
+            #         from_=TWILIO_PHONE_NUMBER,
+            #         to=contact
+            #     )
+            #     logger.info(f"📨 Twilio SMS sent to {contact}: {message.sid}")
+            # except Exception as e:
+            #     logger.error(f"❌ Failed to send SMS to {contact}: {e}")
             
             # 2. Make Voice Call
             try:
+                # Enhanced voice message since SMS is disabled
+                voice_msg = f"Security Alert. {detection_type} detected at {camera_name}. Confidence is {int(confidence * 100)} percent. Please verify the dashboard immediately."
+                
                 call = twilio_client.calls.create(
-                    twiml=f'<Response><Say>Security Alert. {detection_type} detected at {camera_name}. Please check your messages for location details.</Say></Response>',
+                    twiml=f'<Response><Say>{voice_msg}</Say></Response>',
                     to=contact,
                     from_=TWILIO_PHONE_NUMBER
                 )
                 logger.info(f"📞 Twilio Call initiated to {contact}: {call.sid}")
+                success_count += 1
             except Exception as e:
                 logger.error(f"❌ Failed to initiate call to {contact}: {e}")
         

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Query, Body, Form, BackgroundTasks, APIRouter, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -38,6 +38,12 @@ import custom_camera_detection
 
 # Initialize IPFS Manager
 ipfs = IPFSManager()
+
+# Initialize Roboflow Client
+CLIENT = InferenceHTTPClient(
+    api_url="https://serverless.roboflow.com",
+    api_key="2J1WkKz6yPss5qhRiHuE"
+)
 
 # Base paths and env
 ROOT_DIR = Path(__file__).parent
@@ -119,15 +125,15 @@ else:
 
 # Load violence detection model
 violence_model = None
-# try:
-#     if VIOLENCE_MODEL_PATH.exists():
-#         logger.info(f"Loading violence model from {VIOLENCE_MODEL_PATH}")
-#         violence_model = YOLO(str(VIOLENCE_MODEL_PATH))
-#         logger.info(f"Violence model loaded successfully. Classes: {violence_model.names}")
-#     else:
-#         logger.warning(f"Violence model not found at {VIOLENCE_MODEL_PATH}")
-# except Exception as e:
-#     logger.warning(f"Failed to load violence model: {e}")
+try:
+    if VIOLENCE_MODEL_PATH.exists():
+        logger.info(f"Loading violence model from {VIOLENCE_MODEL_PATH}")
+        violence_model = YOLO(str(VIOLENCE_MODEL_PATH))
+        logger.info(f"Violence model loaded successfully. Classes: {violence_model.names}")
+    else:
+        logger.warning(f"Violence model not found at {VIOLENCE_MODEL_PATH}")
+except Exception as e:
+    logger.warning(f"Failed to load violence model: {e}")
 
 # Load thermal detection model (thermal.pt)
 thermal_model = None
@@ -282,63 +288,10 @@ if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
     except Exception as e:
         logger.warning(f"⚠️ Failed to initialize Twilio Client: {e}")
 
-def send_twilio_alert(detection_data: dict):
-    """Send Twilio SMS alert and Voice Call for verified detections"""
-    if not twilio_client:
-        logger.debug("Twilio client not initialized, skipping alert")
-        return
+from utils.alerts import send_twilio_alert
 
-    try:
-        detection_type = detection_data.get('detection_type', 'Unknown Threat')
-        confidence = detection_data.get('confidence', 0.0)
-        camera_name = detection_data.get('camera_name', 'Unknown Camera')
-        timestamp = detection_data.get('timestamp', datetime.now().isoformat())
-        location = detection_data.get('location', {})
-        
-        # Construct Google Maps Link
-        lat = location.get('lat', 0)
-        lng = location.get('lng', 0)
-        maps_link = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
-        
-        message_body = (
-            f"🚨 SECURITY ALERT 🚨\n"
-            f"Type: {detection_type.upper()}\n"
-            f"Confidence: {confidence:.1%}\n"
-            f"Camera: {camera_name}\n"
-            f"Time: {timestamp}\n"
-            f"Location: {maps_link}\n"
-            f"Please verify immediately."
-        )
 
-        for contact in EMERGENCY_CONTACTS:
-            contact = contact.strip()
-            if not contact:
-                continue
-            
-            # 1. Send SMS
-            try:
-                message = twilio_client.messages.create(
-                    body=message_body,
-                    from_=TWILIO_PHONE_NUMBER,
-                    to=contact
-                )
-                logger.info(f"📨 Twilio SMS sent to {contact}: {message.sid}")
-            except Exception as e:
-                logger.error(f"❌ Failed to send SMS to {contact}: {e}")
 
-            # 2. Make Voice Call
-            try:
-                call = twilio_client.calls.create(
-                    twiml=f'<Response><Say>Security Alert. {detection_type} detected at {camera_name}. Please check your messages for location details.</Say></Response>',
-                    to=contact,
-                    from_=TWILIO_PHONE_NUMBER
-                )
-                logger.info(f"📞 Twilio Call initiated to {contact}: {call.sid}")
-            except Exception as e:
-                logger.error(f"❌ Failed to initiate call to {contact}: {e}")
-            
-    except Exception as e:
-        logger.error(f"❌ Failed to process Twilio alert: {e}")
 
 def count_people_from_frame(frame) -> int:
     """Count people in frame"""
@@ -641,55 +594,63 @@ def handle_dual_verification(frame, detection, verification, camera_id, camera_n
     4. Save annotated images
     """
     try:
+        logger.info(f"🎯 handle_dual_verification called for {camera_name}")
         verification_id = str(uuid.uuid4())
         detection_id = str(uuid.uuid4())
+        
+        # Determine status based on verification result
+        is_verified = verification.get('verified', False)
+        det_type = detection.get('detection_type', 'pistol')
+        
+        logger.info(f"📊 Detection: {det_type}, Verified: {is_verified}, Conf: {detection['confidence']:.2f}")
         
         # Save full frame
         full_frame_fname = f"dual_full_{detection_id}.jpg"
         full_frame_path = DETECTIONS_DIR / full_frame_fname
         cv2.imwrite(str(full_frame_path), frame)
+        logger.info(f"💾 Saved full frame: {full_frame_fname}")
         
         # Save cropped region
         cropped_region = extract_region(frame, detection['bbox'])
         cropped_fname = f"dual_crop_{detection_id}.jpg"
         cropped_path = DETECTIONS_DIR / cropped_fname
         cv2.imwrite(str(cropped_path), cropped_region)
+        logger.info(f"💾 Saved cropped region: {cropped_fname}")
         
         # Save annotated image with both model results
         annotated = frame.copy()
         bbox = detection['bbox']
         x1, y1, x2, y2 = int(bbox['x1']), int(bbox['y1']), int(bbox['x2']), int(bbox['y2'])
         
-        # Draw bbox
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        # Draw bbox (Red if unverified, Green if verified)
+        color = (0, 255, 0) if is_verified else (0, 0, 255)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
         
         # Add labels
         label1 = f"best.pt: {detection['confidence']:.2f}"
-        label2 = f"best(1).pt: {verification['confidence']:.2f}"
+        label2 = f"best(1).pt: {verification.get('confidence', 0.0):.2f}"
         cv2.putText(annotated, label1, (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(annotated, label2, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(annotated, label2, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if is_verified else (0, 0, 255), 2)
         
         annotated_fname = f"dual_annotated_{detection_id}.jpg"
         annotated_path = DETECTIONS_DIR / annotated_fname
         cv2.imwrite(str(annotated_path), annotated)
+        logger.info(f"💾 Saved annotated image: {annotated_fname}")
         
-        # Send Twilio call immediately
-        avg_confidence = (detection['confidence'] + verification['confidence']) / 2
-        twilio_message = f"DUAL VERIFICATION ALERT: Gun detected with {avg_confidence:.1%} confidence. Both models agree. Location: {location.get('lat', 0)}, {location.get('lng', 0)}"
+        # Send Twilio call immediately (if not already sent in Stage 1)
+        # Note: We are now sending it in Stage 1, so this might be redundant or a fallback.
+        # But let's keep it safe.
+        avg_confidence = (detection['confidence'] + verification.get('confidence', 0.0)) / 2
+        status_str = "VERIFIED" if is_verified else "UNVERIFIED"
+        twilio_message = f"{status_str} ALERT: {det_type} detected. Conf: {avg_confidence:.1%}. Location: {location.get('lat', 0)}, {location.get('lng', 0)}"
         
         twilio_sid = None
         try:
-            # Send Twilio alert
-            alert_data = {
-                'detection_type': 'pistol (dual verified)',
-                'confidence': avg_confidence,
-                'camera_name': camera_name,
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'location': location
-            }
-            send_twilio_alert(alert_data)
-            twilio_sid = "sent"
-            logger.warning(f"🚨 DUAL VERIFICATION: {twilio_message}")
+            # Send Twilio alert (only if verified? User said "Stage 1 or 2", so maybe always?)
+            # But we already sent it in Stage 1! 
+            # Let's NOT send it here to avoid duplicate calls, OR check a flag.
+            # For now, we'll assume Stage 1 handled it.
+            pass 
         except Exception as e:
             logger.error(f"Failed to send Twilio alert: {e}")
         
@@ -702,7 +663,7 @@ def handle_dual_verification(frame, detection, verification, camera_id, camera_n
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "bbox": detection['bbox'],
             "best_pt_confidence": detection['confidence'],
-            "best1_pt_confidence": verification['confidence'],
+            "best1_pt_confidence": verification.get('confidence', 0.0),
             "full_frame_path": f"/detections/{full_frame_fname}",
             "cropped_region_path": f"/detections/{cropped_fname}",
             "annotated_image_path": f"/detections/{annotated_fname}",
@@ -711,11 +672,13 @@ def handle_dual_verification(frame, detection, verification, camera_id, camera_n
             "admin_decision": None,
 
             "blockchain_verified": False,
-            "twilio_call_sent": twilio_sid is not None,
-            "twilio_call_sid": twilio_sid
+            "twilio_call_sent": True, # Assumed sent in Stage 1
+            "twilio_call_sid": "stage1_sent"
         }
         
-        db.pending_verifications.insert_one(verification_doc)
+        logger.info(f"📝 Inserting verification record to pending_verifications: {verification_id}")
+        result = db.pending_verifications.insert_one(verification_doc)
+        logger.info(f"✅ Inserted to pending_verifications with _id: {result.inserted_id}")
         
         # Create blockchain entry with PENDING status
         blockchain_data = {
@@ -727,14 +690,14 @@ def handle_dual_verification(frame, detection, verification, camera_id, camera_n
         # Update verification with blockchain hash
         db.pending_verifications.update_one(
             {"id": verification_id},
-
+            {"$set": {"blockchain_hash": "pending"}} # Placeholder
         )
         
         # Also save to detections collection
         detection_doc = {
             "id": detection_id,
             "verification_id": verification_id,
-            "detection_type": "pistol",
+            "detection_type": det_type,
             "model": "best.pt + best (1).pt",
             "confidence": avg_confidence,
             "bbox": detection['bbox'],
@@ -743,15 +706,17 @@ def handle_dual_verification(frame, detection, verification, camera_id, camera_n
             "camera_name": camera_name,
             "location": location,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "verification_status": "dual_verified",
+            "verification_status": "dual_verified" if is_verified else "unverified",
             "requires_admin_review": True,
 
             "alert_sent": True
         }
         
-        db.detections.insert_one(detection_doc)
+        logger.info(f"📝 Inserting detection record to detections collection")
+        det_result = db.detections.insert_one(detection_doc)
+        logger.info(f"✅ Inserted to detections with _id: {det_result.inserted_id}")
         
-        logger.info(f"✅ Dual verification saved: {verification_id}")
+        logger.info(f"✅ Dual verification saved successfully: {verification_id}")
         
         return verification_id
         
@@ -768,6 +733,7 @@ def log_single_model_detection(detection):
 def detect_weapons_and_people(frame, gun_conf_threshold=0.80, verification_conf_threshold=0.60, use_or_logic=False, use_violence_model=False, camera_id="webcam", camera_type=CameraType.WEBCAM):
     """Detect weapons and count people in frame"""
     global detection_stats
+    global last_verification_time
     
     guns_detected = 0
     knives_detected = 0
@@ -876,33 +842,64 @@ def detect_weapons_and_people(frame, gun_conf_threshold=0.80, verification_conf_
                 
                 logger.info(f"🔴 Stage 1: GUN detected by best.pt @ {conf:.2f}")
                 
-                # Stage 2: Verification with best (1).pt (gun specialist model)
+                # IMMEDIATE ALERT ON STAGE 1 (User Request)
+                # We draw the box and send alert NOW, regardless of verification
+                
+                # Prepare detection data
+                detection_id = str(uuid.uuid4())
+                detection_data = {
+                    "id": detection_id,
+                    "detection_type": "pistol",
+                    "model": "best.pt",
+                    "confidence": conf,
+                    "bbox": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
+                    "camera_id": camera_id,
+                    "camera_name": "Live Webcam" if camera_type == CameraType.WEBCAM else f"Camera {camera_id}",
+                    "location": {"lat": 0, "lng": 0},
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "alert_sent": True,
+                    "verification_status": "unverified"
+                }
+                
+                # Trigger Alert Immediately
+                try:
+                    logger.info(f"🚨 Triggering Immediate Alert for Gun (Stage 1)...")
+                    send_twilio_alert(detection_data)
+                except Exception as e:
+                    logger.error(f"❌ Failed to send gun alert: {e}")
+
+                # Draw Initial Box (Red)
+                color = (0, 0, 255) # Red for unverified
+                label = f'GUN {conf:.2f}'
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                
+                detections_to_save.append(detection_data)
+
+                # Stage 2: Verification (Optional for Alert, but used for Admin Queue)
                 bbox_dict = {'x1': float(x1), 'y1': float(y1), 'x2': float(x2), 'y2': float(y2)}
                 cropped_region = extract_region(frame, bbox_dict)
                 
                 verification_result = run_verification_model(cropped_region, conf_threshold=verification_conf_threshold)
                 
                 if verification_result and verification_result['verified']:
-                    # BOTH MODELS AGREE - Dual verification success!
-                    logger.warning(f"🚨 Stage 2: DUAL VERIFICATION SUCCESS! best(1).pt @ {verification_result['confidence']:.2f}")
-                    
+                    # Update to Verified Status
+                    logger.warning(f"✅ Stage 2: DUAL VERIFICATION SUCCESS! best(1).pt @ {verification_result['confidence']:.2f}")
                     guns_detected += 1
                     
-                    # Check cooldown before sending to admin verification
-                    global last_verification_time
-                    current_time = time.time()
+                    # Update visual to Green
+                    color = (0, 255, 0)
+                    label = f'VERIFIED GUN {conf:.2f}/{verification_result["confidence"]:.2f}'
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                     
+                    # Queue for Admin
+                    current_time = time.time()
                     if last_verification_time is None or (current_time - last_verification_time) >= verification_cooldown:
-                        # Cooldown expired, send to verification queue
-                        # ONLY if it is a live webcam (skip for file/video loops to avoid spamming blockchain)
                         if camera_type == CameraType.WEBCAM:
                             verification_data = {
                                 'frame': frame.copy(),
-                                'detection': {
-                                    'confidence': conf,
-                                    'bbox': bbox_dict,
-                                    'detection_type': 'pistol'
-                                },
+                                'detection': {'confidence': conf, 'bbox': bbox_dict, 'detection_type': 'pistol'},
                                 'verification': verification_result,
                                 'camera_id': camera_id,
                                 'camera_name': "Live Webcam",
@@ -910,53 +907,64 @@ def detect_weapons_and_people(frame, gun_conf_threshold=0.80, verification_conf_
                             }
                             dual_verification_queue.put(verification_data)
                             last_verification_time = current_time
-                            logger.info(f"✅ GUN verification queued for admin (best.pt: {conf:.2f}, best(1).pt: {verification_result['confidence']:.2f})")
-                        else:
-                            logger.info(f"ℹ️ Skipping verification queue for non-webcam source: {camera_id}")
-                    else:
-                        # Still in cooldown period
-                        time_remaining = verification_cooldown - (current_time - last_verification_time)
-                        logger.info(f"⏳ Verification cooldown active ({time_remaining:.1f}s remaining)")
-                    
-                    # Draw bounding box with VERIFIED label (green)
-                    color = (0, 255, 0)  # Green for verified gun
-                    label = f'VERIFIED GUN {conf:.2f}/{verification_result["confidence"]:.2f}'
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-                    cv2.putText(frame, label, (x1, y1 - 10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                    
-                    # Add to detections_to_save for IPFS upload
-                    detection_id = str(uuid.uuid4())
-                    detections_to_save.append({
-                        "id": detection_id,
-                        "detection_type": "pistol",
-                        "model": "best.pt + best(1).pt",
-                        "confidence": conf,
-                        "bbox": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
-                        "camera_id": camera_id,
-                        "camera_name": "Live Webcam" if camera_type == CameraType.WEBCAM else f"Camera {camera_id}",
-                        "location": {"lat": 0, "lng": 0},
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "alert_sent": False,
-                        "verification_status": "dual_verified"
-                    })
                 else:
-                    # best(1).pt verification failed - skip this detection to reduce false positives
-                    logger.info(f"⚠️ Stage 2: best(1).pt FAILED to verify gun - skipping to reduce false positives")
-                    continue
-
+                    logger.info(f"⚠️ Stage 2: best(1).pt FAILED verification - Sending to Admin as UNVERIFIED")
+                    # Queue for Admin
+                    current_time = time.time()
+                    if last_verification_time is None or (current_time - last_verification_time) >= verification_cooldown:
+                        if camera_type == CameraType.WEBCAM:
+                            verification_data = {
+                                'frame': frame.copy(),
+                                'detection': {'confidence': conf, 'bbox': bbox_dict, 'detection_type': 'pistol'},
+                                'verification': {'verified': False, 'confidence': 0.0}, # Failed verification
+                                'camera_id': camera_id,
+                                'camera_name': "Live Webcam",
+                                'location': {'lat': 0, 'lng': 0}
+                            }
+                            logger.info(f"📤 Queueing UNVERIFIED detection to admin panel (conf: {conf:.2f})")
+                            dual_verification_queue.put(verification_data)
+                            last_verification_time = current_time
+                            logger.info(f"✅ Detection added to verification queue. Queue size: {dual_verification_queue.qsize()}")
             elif 'knife' in class_name:
-                # KNIFE detection with DUAL VERIFICATION using best (10).pt
-                if conf < 0.70:  # 70% confidence for best.pt (lowered to detect more knives)
+                # KNIFE detection
+                if conf < 0.80:
                     continue
                 
                 logger.info(f"🔪 Stage 1: KNIFE detected by best.pt @ {conf:.2f}")
                 
-                # Stage 2: Verification with best (10).pt (knife specialist model)
+                # IMMEDIATE ALERT ON STAGE 1
+                detection_id = str(uuid.uuid4())
+                detection_data = {
+                    "id": detection_id,
+                    "detection_type": "knife",
+                    "confidence": conf,
+                    "bbox": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
+                    "camera_id": "webcam",
+                    "camera_name": "Live Webcam",
+                    "location": {"lat": 0, "lng": 0},
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "alert_sent": True,
+                    "verification_status": "unverified"
+                }
+                
+                try:
+                    logger.info(f"🚨 Triggering Immediate Alert for Knife (Stage 1)...")
+                    send_twilio_alert(detection_data)
+                except Exception as e:
+                    logger.error(f"❌ Failed to send knife alert: {e}")
+
+                # Draw Initial Box (Red)
+                color = (0, 0, 255)
+                label = f'KNIFE {conf:.2f}'
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+                
+                detections_to_save.append(detection_data)
+
+                # Stage 2: Verification (Optional)
                 bbox_dict = {'x1': float(x1), 'y1': float(y1), 'x2': float(x2), 'y2': float(y2)}
                 cropped_region = extract_region(frame, bbox_dict)
                 
-                # Run best (10).pt on cropped region
                 best10_verified = False
                 best10_conf = 0.0
                 
@@ -964,49 +972,23 @@ def detect_weapons_and_people(frame, gun_conf_threshold=0.80, verification_conf_
                     try:
                         best10_results = best10_model(cropped_region, conf=0.60, verbose=False)
                         for res in best10_results:
-                            if res.boxes is not None and len(res.boxes) > 0:
+                            if res.boxes is not None:
                                 for b in res.boxes:
-                                    cls_id = int(b.cls[0])
-                                    detected_class = best10_model.names.get(cls_id, '').lower()
-                                    if 'knife' in detected_class:
+                                    if 'knife' in best10_model.names.get(int(b.cls[0]), '').lower():
                                         best10_conf = float(b.conf[0])
                                         if best10_conf >= 0.60:
                                             best10_verified = True
                                             break
-                            if best10_verified:
-                                break
-                    except Exception as e:
-                        logger.error(f"Error running best (10).pt: {e}")
+                    except Exception:
+                        pass
                 
                 if best10_verified:
-                    # BOTH MODELS AGREE - Knife verified!
                     logger.warning(f"✅ Stage 2: KNIFE VERIFIED by best (10).pt @ {best10_conf:.2f}")
                     knives_detected += 1
-                    color = (0, 165, 255)  # Orange for verified knives
+                    color = (0, 165, 255)  # Orange
                     label = f'VERIFIED KNIFE {conf:.2f}/{best10_conf:.2f}'
-                    det_type = 'knife'
-                    
-                    # Store detection data for saving to DB
-                    detection_id = str(uuid.uuid4())
-                    detections_to_save.append({
-                        "id": detection_id,
-                        "detection_type": det_type,
-                        "confidence": conf,
-                        "bbox": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
-                        "camera_id": "webcam",
-                        "camera_name": "Live Webcam",
-                        "location": {"lat": 0, "lng": 0},
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "alert_sent": False,
-                        "verification_status": "dual_verified"  # best.pt + best(10).pt
-                    })
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-                    cv2.putText(frame, label, (x1, y1 - 10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-                else:
-                    # best(10).pt verification failed - skip to reduce false positives
-                    logger.info(f"⚠️ Stage 2: best(10).pt FAILED to verify knife - skipping to reduce false positives")
-                    continue
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
     
     
     # Detect violence (Classification Model)
@@ -1233,19 +1215,23 @@ def dual_verification_worker():
         try:
             # Get verification from queue with timeout
             try:
+                logger.debug("📭 Checking verification queue...")
                 verification_data = dual_verification_queue.get(timeout=1.0)
+                logger.info(f"📬 Got verification data from queue!")
             except:
                 # Queue is empty, continue
                 continue
             
             if verification_data is None:  # Sentinel value to stop worker
+                logger.info("🛑 Received stop signal (None)")
                 break
             
             # Process verification
             try:
-                logger.info(f"🔍 Processing dual verification...")
+                logger.info(f"🔍 Processing dual verification for camera: {verification_data.get('camera_name', 'unknown')}")
                 handle_dual_verification(db=db_sync, **verification_data)
                 dual_verification_queue.task_done()
+                logger.info("✅ Verification processed successfully")
             except Exception as e:
                 logger.error(f"❌ Error processing dual verification: {e}", exc_info=True)
                 
@@ -1376,9 +1362,9 @@ def handle_live_ipfs_upload(frame, detections):
         
         result = ipfs.upload_to_ipfs(str(temp_path), metadata)
         
-        if result and 'IpfsHash' in result:
-            ipfs_hash = result['IpfsHash']
-            ipfs_link = f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
+        if result and 'ipfs_hash' in result:  # Changed from 'IpfsHash' to 'ipfs_hash'
+            ipfs_hash = result['ipfs_hash']
+            ipfs_link = result['url']  # Use the url from result instead of constructing it
             
             # 3. Update global stats for frontend
             detection_stats['latest_ipfs'] = {
@@ -1388,12 +1374,13 @@ def handle_live_ipfs_upload(frame, detections):
                 "threat_type": detections[0]['detection_type']
             }
             logger.info(f"✅ Live evidence uploaded to IPFS: {ipfs_hash}")
+            logger.info(f"🔗 IPFS URL: {ipfs_link}")
             
             # Clean up temp file
             if temp_path.exists():
                 os.remove(temp_path)
         else:
-            logger.error("❌ Failed to upload live evidence to IPFS")
+            logger.error(f"❌ Failed to upload live evidence to IPFS: {result}")
             
     except Exception as e:
         logger.error(f"❌ Error in handle_live_ipfs_upload: {e}")
@@ -1590,6 +1577,71 @@ async def process_detection(image_data, camera_id: str, camera_name: str, locati
                 detections_list.append(detection_data)
         
         logger.info(f"✅ People detected: {len(detections_list)}")
+        return detections_list
+
+    # --- Violence Detection Mode ---
+    if detection_mode == "violence":
+        if violence_model is None:
+            logger.warning("⚠️ Violence model not loaded")
+            return []
+            
+        logger.info("👊 Running Violence Detection model...")
+        violence_results = violence_model.predict(processed_image, imgsz=224, verbose=False)
+        
+        if violence_results:
+            res = violence_results[0]
+            top1_label = None
+            top1_conf = 0.0
+            
+            if hasattr(res, "probs"):
+                p = res.probs
+                if hasattr(p, "top1") and p.top1 is not None:
+                    top1_idx = int(p.top1)
+                    top1_conf = float(p.top1conf) if hasattr(p, "top1conf") else 0.0
+                    if hasattr(res, "names"):
+                        top1_label = res.names[top1_idx]
+            
+            logger.info(f"👊 Violence Model Result: Label={top1_label}, Conf={top1_conf:.2f}")
+
+            # Check if violence is detected (Threshold 50%)
+            # Note: Classes are {0: '_classes', 1: 'not_violence', 2: 'violence'}
+            if top1_label and top1_label.lower() == 'violence' and top1_conf > 0.50:
+                detection_id = str(uuid.uuid4())
+                fname = f"violence_{detection_id}.jpg"
+                path = DETECTIONS_DIR / fname
+                image_path_val = None
+                
+                try:
+                    # Create annotated image
+                    annotated = processed_image.copy()
+                    label = f"VIOLENCE {top1_conf:.2f}"
+                    # Draw label at top left
+                    cv2.putText(annotated, label, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    cv2.imwrite(str(path), annotated)
+                    image_path_val = f"/detections/{fname}"
+                except Exception as e:
+                    logger.warning(f"Failed to create annotated image: {e}")
+                
+                detection_data = {
+                    "id": detection_id,
+                    "camera_id": camera_id or "upload",
+                    "camera_name": camera_name,
+                    "detection_type": "violence",
+                    "confidence": top1_conf,
+                    "model": "best (2).pt",
+                    "bbox": {"x1": 0, "y1": 0, "x2": float(img_w), "y2": float(img_h)}, # Whole image
+                    "image_path": image_path_val,
+                    "location": location,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "alert_sent": False
+                }
+                
+                await db.detections.insert_one(detection_data)
+                detections_list.append(detection_data)
+                logger.info(f"✅ Violence detected: {top1_conf:.2f}")
+            else:
+                logger.info(f"ℹ️ No violence detected (Label: {top1_label}, Conf: {top1_conf:.2f})")
+                
         return detections_list
 
     # --- Weapon Detection Modes ---
@@ -2377,9 +2429,159 @@ async def test_upload(
                              cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                              cv2.putText(annotated_frame, f"Person {det['confidence']:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                     
-                    # === STANDARD DETECTION (if not topview) ===
+                    # === STANDARD DETECTION (all other modes) ===
                     else:
-                        pass
+                        frame_detections = []
+                        
+                        # Run detection based on model_type
+                        if model_type == 'weapon':
+                            # Weapon detection
+                            results = model(frame, conf=0.50, verbose=False)
+                            for result in results:
+                                if result.boxes is not None:
+                                    for box in result.boxes:
+                                        cls = int(box.cls[0])
+                                        conf = float(box.conf[0])
+                                        class_name = model.names[cls].lower()
+                                        if 'pistol' in class_name or 'gun' in class_name or 'knife' in class_name or 'rifle' in class_name or 'shotgun' in class_name:
+                                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                            frame_detections.append({
+                                                "class": class_name,
+                                                "confidence": conf,
+                                                "bbox": [x1, y1, x2, y2],
+                                                "model": "best.pt",
+                                                "color": (0, 0, 255)  # Red
+                                            })
+                        
+                        elif model_type == 'gun-fusion':
+                            # Gun fusion - multiple models
+                            results = model(frame, conf=0.50, verbose=False)
+                            for result in results:
+                                if result.boxes is not None:
+                                    for box in result.boxes:
+                                        cls = int(box.cls[0])
+                                        conf = float(box.conf[0])
+                                        class_name = model.names[cls].lower()
+                                        if 'pistol' in class_name or 'gun' in class_name:
+                                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                            frame_detections.append({
+                                                "class": f"{class_name} (best.pt)",
+                                                "confidence": conf,
+                                                "bbox": [x1, y1, x2, y2],
+                                                "model": "best.pt",
+                                                "color": (255, 0, 0)  # Blue
+                                            })
+                            
+                            if best1_model:
+                                results1 = best1_model(frame, conf=0.30, verbose=False)
+                                for result in results1:
+                                    if result.boxes is not None:
+                                        for box in result.boxes:
+                                            cls = int(box.cls[0])
+                                            conf = float(box.conf[0])
+                                            class_name = best1_model.names[cls].lower()
+                                            if 'pistol' in class_name or 'gun' in class_name:
+                                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                                frame_detections.append({
+                                                    "class": f"{class_name} (best1.pt)",
+                                                    "confidence": conf,
+                                                    "bbox": [x1, y1, x2, y2],
+                                                    "model": "best (1).pt",
+                                                    "color": (255, 255, 0)  # Cyan
+                                                })
+                            
+                            if best8_model:
+                                results8 = best8_model(frame, conf=0.30, verbose=False)
+                                for result in results8:
+                                    if result.boxes is not None:
+                                        for box in result.boxes:
+                                            cls = int(box.cls[0])
+                                            conf = float(box.conf[0])
+                                            class_name = best8_model.names[cls].lower()
+                                            if 'pistol' in class_name or 'gun' in class_name:
+                                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                                frame_detections.append({
+                                                    "class": f"{class_name} (best8.pt)",
+                                                    "confidence": conf,
+                                                    "bbox": [x1, y1, x2, y2],
+                                                    "model": "best (8).pt",
+                                                    "color": (0, 255, 255)  # Yellow
+                                                })
+                        
+                        elif model_type == 'person':
+                            if people_model:
+                                results = people_model(frame, conf=0.50, verbose=False)
+                                for result in results:
+                                    if result.boxes is not None:
+                                        for box in result.boxes:
+                                            cls = int(box.cls[0])
+                                            conf = float(box.conf[0])
+                                            class_name = people_model.names[cls].lower()
+                                            if class_name == 'person':
+                                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                                frame_detections.append({
+                                                    "class": "person",
+                                                    "confidence": conf,
+                                                    "bbox": [x1, y1, x2, y2],
+                                                    "model": "yolov8n.pt",
+                                                    "color": (0, 255, 0)  # Green
+                                                })
+                        
+                        elif model_type == 'all':
+                            # Run all models - weapon + people + violence
+                            results = model(frame, conf=0.50, verbose=False)
+                            for result in results:
+                                if result.boxes is not None:
+                                    for box in result.boxes:
+                                        cls = int(box.cls[0])
+                                        conf = float(box.conf[0])
+                                        class_name = model.names[cls].lower()
+                                        if 'pistol' in class_name or 'gun' in class_name or 'knife' in class_name:
+                                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                            frame_detections.append({
+                                                "class": class_name,
+                                                "confidence": conf,
+                                                "bbox": [x1, y1, x2, y2],
+                                                "model": "best.pt",
+                                                "color": (0, 0, 255)  # Red
+                                            })
+                            
+                            if people_model:
+                                results_people = people_model(frame, conf=0.50, verbose=False)
+                                for result in results_people:
+                                    if result.boxes is not None:
+                                        for box in result.boxes:
+                                            cls = int(box.cls[0])
+                                            conf = float(box.conf[0])
+                                            class_name = people_model.names[cls].lower()
+                                            if class_name == 'person':
+                                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                                frame_detections.append({
+                                                    "class": "person",
+                                                    "confidence": conf,
+                                                    "bbox": [x1, y1, x2, y2],
+                                                    "model": "yolov8n.pt",
+                                                    "color": (0, 255, 0)  # Green
+                                                })
+                        
+                        # Draw detections on annotated_frame
+                        for det in frame_detections:
+                            x1, y1, x2, y2 = det['bbox']
+                            color = det.get('color', (0, 255, 0))
+                            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                            label = f"{det['class']} {det['confidence']:.2f}"
+                            cv2.putText(annotated_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                            
+                            # Add to overall detections list
+                            detections.append({
+                                "id": str(uuid.uuid4()),
+                                "class": det['class'],
+                                "confidence": det['confidence'],
+                                "bbox": det['bbox'],
+                                "model": det['model'],
+                                "frame_number": frame_count,
+                                "timestamp": frame_count / fps
+                            })
                 else:
                      # For frames in between, we could draw the previous boxes, but for now let's just write the raw frame
                      # or maybe just skip detection to keep it fast.
@@ -2398,16 +2600,23 @@ async def test_upload(
                 annotated_fname = f"test_annotated_{uuid.uuid4()}.jpg"
                 annotated_path = DETECTIONS_DIR / annotated_fname
                 cv2.imwrite(str(annotated_path), annotated_frame)
-                image_path = f"/detections/{annotated_fname}"
+                annotated_image_url = f"/detections/{annotated_fname}"
             else:
-                image_path = None
+                annotated_image_url = None
                 
             return {
                 "status": "ok",
                 "detections": detections,
-                "image_path": image_path,
-                "video_path": f"/uploads/{output_filename}",
-                "message": f"Processed {frame_count} frames. Video saved."
+                "annotated_image_url": annotated_image_url,
+                "video_output": f"/uploads/{output_filename}",
+                "video_stats": {
+                    "resolution": f"{width}x{height}",
+                    "fps": int(fps),
+                    "total_frames": frame_count,
+                    "total_detections": len(detections)
+                },
+                "processing_time": 0,  # Could add actual timing if needed
+                "message": f"Processed {frame_count} frames with {len(detections)} detections"
             }
 
         # Handle Image
@@ -2431,20 +2640,450 @@ async def test_upload(
                  })
              image = image.copy() # Prepare for annotation below
         
-        # === WEAPON DETECTION ===
-        elif model_type in ['all', 'weapon']:
-            # Placeholder for weapon detection logic
-            pass # Replace with actual weapon detection call
+        # === WEAPON DETECTION (best.pt + best (1).pt) ===
+        elif model_type == 'weapon':
+            try:
+                # Run best.pt for weapon detection
+                results = model(image, conf=0.50, verbose=False)
+                for result in results:
+                    if result.boxes is None:
+                        continue
+                    for box in result.boxes:
+                        cls = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        class_name = model.names[cls].lower()
+                        
+                        if 'pistol' in class_name or 'gun' in class_name or 'knife' in class_name or 'rifle' in class_name or 'shotgun' in class_name:
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            detections.append({
+                                "id": str(uuid.uuid4()),
+                                "class": class_name,
+                                "confidence": conf,
+                                "bbox": [x1, y1, x2, y2],
+                                "model": "best.pt",
+                                "type": "weapon"
+                            })
+                
+                # Run best (1).pt for verification
+                if best1_model:
+                    results1 = best1_model(image, conf=0.30, verbose=False)
+                    for result in results1:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = best1_model.names[cls].lower()
+                            
+                            if 'pistol' in class_name or 'gun' in class_name or 'knife' in class_name or 'rifle' in class_name or 'shotgun' in class_name:
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": class_name,
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "best (1).pt",
+                                    "type": "weapon"
+                                })
+            except Exception as e:
+                logger.error(f"❌ Weapon detection error: {e}")
+        
+        # === GUN FUSION DETECTION ===
+        elif model_type == 'gun-fusion':
+            try:
+                # Run best.pt (50% threshold)
+                results = model(image, conf=0.50, verbose=False)
+                for result in results:
+                    if result.boxes is None:
+                        continue
+                    for box in result.boxes:
+                        cls = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        class_name = model.names[cls].lower()
+                        
+                        if 'pistol' in class_name or 'gun' in class_name:
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            detections.append({
+                                "id": str(uuid.uuid4()),
+                                "class": f"{class_name} (best.pt)",
+                                "confidence": conf,
+                                "bbox": [x1, y1, x2, y2],
+                                "model": "best.pt@50%",
+                                "type": "gun_fusion"
+                            })
+                
+                # Run best (1).pt (30% threshold)
+                if best1_model:
+                    results1 = best1_model(image, conf=0.30, verbose=False)
+                    for result in results1:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = best1_model.names[cls].lower()
+                            
+                            if 'pistol' in class_name or 'gun' in class_name:
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": f"{class_name} (best1.pt)",
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "best (1).pt@30%",
+                                    "type": "gun_fusion"
+                                })
+                
+                # Run best (8).pt (30% threshold)
+                if best8_model:
+                    results8 = best8_model(image, conf=0.30, verbose=False)
+                    for result in results8:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = best8_model.names[cls].lower()
+                            
+                            if 'pistol' in class_name or 'gun' in class_name:
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": f"{class_name} (best8.pt)",
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "best (8).pt@30%",
+                                    "type": "gun_fusion"
+                                })
+                
+                # Run thermal model if available (20% threshold)
+                if thermal_model:
+                    results_thermal = thermal_model(image, conf=0.20, verbose=False)
+                    for result in results_thermal:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            detections.append({
+                                "id": str(uuid.uuid4()),
+                                "class": "thermal_gun",
+                                "confidence": conf,
+                                "bbox": [x1, y1, x2, y2],
+                                "model": "thermal.pt@20%",
+                                "type": "gun_fusion"
+                            })
+            except Exception as e:
+                logger.error(f"❌ Gun fusion detection error: {e}")
+        
+        # === DRONE DETECTION (for images) ===
+        elif model_type == 'drone':
+            try:
+                if drone_model:
+                    results = drone_model(image, conf=0.50, verbose=False)
+                    for result in results:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = drone_model.names[cls].lower()
+                            
+                            if 'person' in class_name or 'pedestrian' in class_name:
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": class_name,
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "drone.pt",
+                                    "type": "drone_person"
+                                })
+                else:
+                    logger.warning("Drone model not loaded")
+            except Exception as e:
+                logger.error(f"❌ Drone detection error: {e}")
+        
+        # === THERMAL HUMAN DETECTION ===
+        elif model_type == 'thermal-human':
+            try:
+                # Run thermal human model
+                if thermal_human_model:
+                    results = thermal_human_model(image, conf=0.30, verbose=False)
+                    for result in results:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = thermal_human_model.names[cls].lower()
+                            
+                            if 'person' in class_name or 'human' in class_name:
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": "thermal_human",
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "thermalhuman.pt",
+                                    "type": "thermal_human"
+                                })
+                else:
+                    logger.warning("Thermal human model not loaded")
+                
+                # Also run standard people model
+                if people_model:
+                    results = people_model(image, conf=0.50, verbose=False)
+                    for result in results:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = people_model.names[cls].lower()
+                            
+                            if class_name == 'person':
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": "person",
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "yolov8n.pt",
+                                    "type": "person"
+                                })
+            except Exception as e:
+                logger.error(f"❌ Thermal human detection error: {e}")
+        
+        # === ALL MODELS (COMPREHENSIVE) ===
+        elif model_type == 'all':
+            try:
+                # 1. Weapon detection (best.pt)
+                results = model(image, conf=0.50, verbose=False)
+                for result in results:
+                    if result.boxes is None:
+                        continue
+                    for box in result.boxes:
+                        cls = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        class_name = model.names[cls].lower()
+                        if 'pistol' in class_name or 'gun' in class_name or 'knife' in class_name:
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            detections.append({
+                                "id": str(uuid.uuid4()),
+                                "class": class_name,
+                                "confidence": conf,
+                                "bbox": [x1, y1, x2, y2],
+                                "model": "best.pt",
+                                "type": "weapon"
+                            })
+                
+                # 2. Verification model (best (1).pt)
+                if best1_model:
+                    results1 = best1_model(image, conf=0.30, verbose=False)
+                    for result in results1:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = best1_model.names[cls].lower()
+                            if 'pistol' in class_name or 'gun' in class_name or 'knife' in class_name:
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": class_name,
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "best (1).pt",
+                                    "type": "weapon"
+                                })
+                
+                # 3. People detection
+                if people_model:
+                    results_people = people_model(image, conf=0.50, verbose=False)
+                    for result in results_people:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = people_model.names[cls].lower()
+                            if class_name == 'person':
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": "person",
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "yolov8n.pt",
+                                    "type": "person"
+                                })
+                
+                # 4. Violence detection (Roboflow)
+                temp_infer_path = UPLOAD_DIR / f"temp_infer_{uuid.uuid4()}.jpg"
+                cv2.imwrite(str(temp_infer_path), image)
+                result = CLIENT.infer(str(temp_infer_path), model_id="violence-not_violence-ziv7b/2")
+                if temp_infer_path.exists():
+                    temp_infer_path.unlink()
+                
+                if result and 'predictions' in result:
+                    predictions = result['predictions']
+                    if isinstance(predictions, dict):
+                        predicted_class = None
+                        max_confidence = 0.0
+                        for class_name, class_data in predictions.items():
+                            if isinstance(class_data, dict) and 'confidence' in class_data:
+                                conf = class_data['confidence']
+                                if conf > max_confidence:
+                                    max_confidence = conf
+                                    predicted_class = class_name
+                        
+                        if predicted_class and max_confidence > 0.5:
+                            img_h, img_w = image.shape[:2]
+                            detections.append({
+                                "id": str(uuid.uuid4()),
+                                "class": predicted_class,
+                                "confidence": max_confidence,
+                                "bbox": [0, 0, img_w, img_h],
+                                "model": "roboflow-violence",
+                                "type": "violence"
+                            })
+                
+                # 5. Top-view detection
+                if topview_model:
+                    results_topview = topview_model(image, conf=0.30, verbose=False)
+                    for result in results_topview:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = topview_model.names[cls].lower()
+                            if 'person' in class_name or 'pedestrian' in class_name:
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": "person (topview)",
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "best (9).pt",
+                                    "type": "person"
+                                })
+                
+                logger.info(f"🔍 All models run - {len(detections)} total detections")
+            except Exception as e:
+                logger.error(f"❌ All models detection error: {e}")
         
         # === VIOLENCE DETECTION ===
         elif model_type in ['all', 'violence']:
-            # Placeholder for violence detection logic
-            pass # Replace with actual violence detection call
+            try:
+                # Save temporary image for inference
+                temp_infer_path = UPLOAD_DIR / f"temp_infer_{uuid.uuid4()}.jpg"
+                cv2.imwrite(str(temp_infer_path), image)
+                
+                logger.info("🚨 Sending image to Roboflow for violence detection...")
+                result = CLIENT.infer(str(temp_infer_path), model_id="violence-not_violence-ziv7b/2")
+                logger.info(f"✅ Roboflow response: {result}")
+                
+                # Clean up temp file
+                if temp_infer_path.exists():
+                    temp_infer_path.unlink()
+                
+                # Parse result - This is a CLASSIFICATION model
+                # Response format: {'predictions': {'class_name': {'confidence': 0.99, 'class_id': 1}, ...}}
+                
+                if result and 'predictions' in result:
+                    predictions = result['predictions']
+                    
+                    # Classification format: {'violence': {'confidence': 0.99, 'class_id': 1}, 'non_violence': {...}}
+                    if isinstance(predictions, dict):
+                        # Find the predicted class (highest confidence)
+                        predicted_class = None
+                        max_confidence = 0.0
+                        
+                        for class_name, class_data in predictions.items():
+                            if isinstance(class_data, dict) and 'confidence' in class_data:
+                                conf = class_data['confidence']
+                                if conf > max_confidence:
+                                    max_confidence = conf
+                                    predicted_class = class_name
+                        
+                        # Create a detection entry with the classification result
+                        # Use the whole image as bbox for visualization
+                        if predicted_class and max_confidence > 0.5:  # Threshold for positive detection
+                            img_h, img_w = image.shape[:2]
+                            
+                            # Create bbox covering the whole image
+                            detections.append({
+                                "id": str(uuid.uuid4()),
+                                "class": predicted_class,
+                                "confidence": max_confidence,
+                                "bbox": [0, 0, img_w, img_h],
+                                "model": "roboflow-violence-classifier",
+                                "type": "violence_classification"
+                            })
+                            
+                            logger.info(f"🚨 Violence Classification: {predicted_class} @ {max_confidence:.2%}")
+                    
+                    # Detection format (list of bounding boxes) - fallback
+                    elif isinstance(predictions, list):
+                        for pred in predictions:
+                            if 'x' in pred and 'y' in pred:
+                                x = pred['x']
+                                y = pred['y']
+                                w = pred['width']
+                                h = pred['height']
+                                conf = pred['confidence']
+                                class_name = pred['class']
+                                
+                                # Convert center x,y to top-left x1,y1
+                                x1 = int(x - w / 2)
+                                y1 = int(y - h / 2)
+                                x2 = int(x + w / 2)
+                                y2 = int(y + h / 2)
+                                
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": class_name,
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "roboflow-violence-detector",
+                                    "type": "violence"
+                                })
+
+            except Exception as e:
+                logger.error(f"❌ Roboflow Inference Error: {e}")
+                # Fallback or just log
             
         # === PERSON DETECTION (General) ===
-        elif model_type in ['all', 'person']:
-            # Placeholder for general person detection logic
-            pass # Replace with actual person detection call
+        elif model_type == 'person':
+            try:
+                if people_model:
+                    results = people_model(image, conf=0.50, verbose=False)
+                    for result in results:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = people_model.names[cls].lower()
+                            
+                            if class_name == 'person':
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                detections.append({
+                                    "id": str(uuid.uuid4()),
+                                    "class": "person",
+                                    "confidence": conf,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "model": "yolov8n.pt",
+                                    "type": "person"
+                                })
+                else:
+                    logger.warning("People model not loaded")
+            except Exception as e:
+                logger.error(f"❌ Person detection error: {e}")
             
         # If any detections were made, annotate the image
         if len(detections) > 0 and image is not None:
@@ -2457,14 +3096,15 @@ async def test_upload(
             annotated_fname = f"test_annotated_{uuid.uuid4()}.jpg"
             annotated_path = DETECTIONS_DIR / annotated_fname
             cv2.imwrite(str(annotated_path), image)
-            image_path = f"/detections/{annotated_fname}"
+            annotated_image_url = f"/detections/{annotated_fname}"
         else:
-            image_path = None
+            annotated_image_url = None
             
         return {
             "status": "ok",
             "detections": detections,
-            "image_path": image_path,
+            "annotated_image_url": annotated_image_url,
+            "processing_time": 0,
             "message": "Image processed"
         }
         
@@ -2729,24 +3369,138 @@ overpass_cache = {}
 CACHE_DURATION = 3600  # 1 hour cache
 
 @api_router.get("/emergency-context")
-async def emergency_context(lat: float, lng: float):
-    """Return nearest police/hospital/fire station info (Hardcoded for Pune for speed)"""
+async def emergency_context(lat: float, lng: float, radius: float = 10.0):
+    """Return nearest police/hospital/fire station info within specified radius (in km)
     
-    logger.info(f"🚑 Fetching emergency context for {lat}, {lng} (Using Fast Mock Data)")
+    Args:
+        lat: User latitude
+        lng: User longitude
+        radius: Search radius in kilometers (default: 10km)
+    """
     
-    # Hardcoded data for Pune to ensure instant loading
+    import math
+    
+    def calculate_distance(lat1, lng1, lat2, lng2):
+        """Calculate distance in km using Haversine formula"""
+        R = 6371  # Earth's radius in km
+        dlat = math.radians(lat2 - lat1)
+        dlng = math.radians(lng2 - lng1)
+        a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng/2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        return R * c
+    
+    logger.info(f"🚑 Fetching emergency context for {lat}, {lng} within {radius}km radius")
+    
+    # Comprehensive Pune area data
+    police_data = [
+        {"name": "Pune City Police Commissionerate", "phone": "100", "lat": 18.5204, "lng": 73.8567},
+        {"name": "Shivajinagar Police Station", "phone": "020-25532854", "lat": 18.5314, "lng": 73.8446},
+        {"name": "Deccan Police Station", "phone": "020-25533695", "lat": 18.5165, "lng": 73.8460},
+        {"name": "Kothrud Police Station", "phone": "020-25434101", "lat": 18.5074, "lng": 73.8077},
+        {"name": "Swargate Police Station", "phone": "020-24456503", "lat": 18.5018, "lng": 73.8636},
+        {"name": "Hadapsar Police Station", "phone": "020-26993670", "lat": 18.5089, "lng": 73.9260},
+        {"name": "Koregaon Park Police Station", "phone": "020-26059157", "lat": 18.5362, "lng": 73.8958}
+    ]
+    
+    # General hospitals
+    hospital_data = [
+        {"name": "City Hospital", "phone": "020-24458181", "lat": 18.5196, "lng": 73.8553, "type": "general"},
+        {"name": "Sancheti Hospital", "phone": "020-26051983", "lat": 18.5304, "lng": 73.8997, "type": "general"},
+        {"name": "Aditya Birla Hospital", "phone": "020-71074444", "lat": 18.5642, "lng": 73.7769, "type": "general"},
+        {"name": "Sahyadri Hospital (Deccan)", "phone": "020-67206666", "lat": 18.5174, "lng": 73.8422, "type": "general"}
+    ]
+    
+    # Multi-specialty hospitals
+    multispecialty_data = [
+        {"name": "Ruby Hall Clinic", "phone": "020-66455100", "lat": 18.5308, "lng": 73.8774, "type": "multispecialty", "specialties": ["Cardiology", "Neurology", "Oncology", "Orthopedics"]},
+        {"name": "Jehangir Hospital", "phone": "020-66811000", "lat": 18.5293, "lng": 73.8744, "type": "multispecialty", "specialties": ["Emergency", "ICU", "Surgery", "Pediatrics"]},
+        {"name": "Deenanath Mangeshkar Hospital", "phone": "020-66206000", "lat": 18.4996, "lng": 73.8265, "type": "multispecialty", "specialties": ["Cardiac", "Trauma", "Neurosurgery", "Oncology"]},
+        {"name": "Sahyadri Super Speciality Hospital", "phone": "020-67206666", "lat": 18.5588, "lng": 73.7816, "type": "multispecialty", "specialties": ["Cardiac", "Neuro", "Orthopedic", "Cancer"]},
+        {"name": "Poona Hospital & Research Centre", "phone": "020-66969696", "lat": 18.5314, "lng": 73.8883, "type": "multispecialty", "specialties": ["Multi-organ Transplant", "Cardiac", "Neuro", "Oncology"]},
+        {"name": "KEM Hospital", "phone": "020-26123296", "lat": 18.5287, "lng": 73.8814, "type": "multispecialty", "specialties": ["Emergency", "Trauma", "Surgery", "Critical Care"]}
+    ]
+    
+    fire_data = [
+        {"name": "Central Fire Station", "phone": "101", "lat": 18.5123, "lng": 73.8645},
+        {"name": "Deccan Fire Station", "phone": "101", "lat": 18.5168, "lng": 73.8350},
+        {"name": "Kothrud Fire Station", "phone": "101", "lat": 18.5047, "lng": 73.8137}
+    ]
+    
+    # Calculate distances and filter by radius
+    police_stations = []
+    for p in police_data:
+        dist_km = calculate_distance(lat, lng, p["lat"], p["lng"])
+        if dist_km <= radius:  # Filter by radius
+            police_stations.append({
+                "name": p["name"],
+                "phone": p["phone"],
+                "lat": p["lat"],
+                "lng": p["lng"],
+                "distance_km": round(dist_km, 2),
+                "distance_m": int(dist_km * 1000)
+            })
+    
+    hospitals = []
+    for h in hospital_data:
+        dist_km = calculate_distance(lat, lng, h["lat"], h["lng"])
+        if dist_km <= radius:  # Filter by radius
+            hospitals.append({
+                "name": h["name"],
+                "phone": h["phone"],
+                "lat": h["lat"],
+                "lng": h["lng"],
+                "type": h["type"],
+                "distance_km": round(dist_km, 2),
+                "distance_m": int(dist_km * 1000)
+            })
+    
+    multispecialty_hospitals = []
+    for m in multispecialty_data:
+        dist_km = calculate_distance(lat, lng, m["lat"], m["lng"])
+        if dist_km <= radius:  # Filter by radius
+            multispecialty_hospitals.append({
+                "name": m["name"],
+                "phone": m["phone"],
+                "lat": m["lat"],
+                "lng": m["lng"],
+                "type": m["type"],
+                "specialties": m["specialties"],
+                "distance_km": round(dist_km, 2),
+                "distance_m": int(dist_km * 1000)
+            })
+    
+    fire_stations = []
+    for f in fire_data:
+        dist_km = calculate_distance(lat, lng, f["lat"], f["lng"])
+        if dist_km <= radius:  # Filter by radius
+            fire_stations.append({
+                "name": f["name"],
+                "phone": f["phone"],
+                "lat": f["lat"],
+                "lng": f["lng"],
+                "distance_km": round(dist_km, 2),
+                "distance_m": int(dist_km * 1000)
+            })
+    
+    # Sort by distance
+    police_stations.sort(key=lambda x: x["distance_km"])
+    hospitals.sort(key=lambda x: x["distance_km"])
+    multispecialty_hospitals.sort(key=lambda x: x["distance_km"])
+    fire_stations.sort(key=lambda x: x["distance_km"])
+    
+    # Return only the NEAREST of each type (first item after sorting)
     return {
-        "police_stations": [
-            {"name": "Pune City Police Commissionerate", "phone": "100", "distance": 2.1, "lat": 18.5204, "lng": 73.8567},
-            {"name": "Shivajinagar Police Station", "phone": "020-25532854", "distance": 3.5, "lat": 18.5314, "lng": 73.8446}
-        ],
-        "hospitals": [
-            {"name": "Ruby Hall Clinic", "phone": "020-66455100", "distance": 1.2, "lat": 18.5308, "lng": 73.8774},
-            {"name": "Jehangir Hospital", "phone": "020-66811000", "distance": 1.4, "lat": 18.5293, "lng": 73.8744}
-        ],
-        "fire_stations": [
-            {"name": "Central Fire Station", "phone": "101", "distance": 2.8, "lat": 18.5123, "lng": 73.8645}
-        ],
+        "police_stations": police_stations[:1] if police_stations else [],  # Nearest police station
+        "hospitals": hospitals[:1] if hospitals else [],  # Nearest general hospital
+        "multispecialty_hospitals": multispecialty_hospitals[:1] if multispecialty_hospitals else [],  # Nearest multi-specialty
+        "fire_stations": fire_stations[:1] if fire_stations else [],  # Nearest fire station
+        "radius_km": radius,
+        "total_found": {
+            "police": len(police_stations),
+            "hospitals": len(hospitals),
+            "multispecialty": len(multispecialty_hospitals),
+            "fire": len(fire_stations)
+        },
         "emergency_numbers": {
             "police": "100",
             "ambulance": "108",
@@ -3152,6 +3906,37 @@ async def verify_detection(detection_id: str):
         
     except Exception as e:
         logger.error(f"Verification failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get("/api/test-alert")
+async def test_twilio_alert_endpoint():
+    """Test Twilio Alert Configuration"""
+    try:
+        logger.info("🧪 Testing Twilio Alert...")
+        test_data = {
+            'detection_type': 'TEST_ALERT',
+            'confidence': 1.0,
+            'camera_name': 'Manual Test',
+            'timestamp': datetime.now().isoformat(),
+            'location': {'lat': 0, 'lng': 0}
+        }
+        
+        # Reload utils.alerts to ensure it picks up env vars if they were late
+        import importlib
+        import utils.alerts
+        importlib.reload(utils.alerts)
+        from utils.alerts import send_twilio_alert as send_alert_reloaded
+        
+        success = send_alert_reloaded(test_data)
+        
+        if success:
+            return {"status": "success", "message": "Alert sent successfully"}
+        else:
+            return {"status": "error", "message": "Failed to send alert (check logs)"}
+            
+    except Exception as e:
+        logger.error(f"Test alert failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -1,72 +1,51 @@
+import cv2
 from ultralytics import YOLO
-from PIL import Image
-import matplotlib.pyplot as plt
-import os
-import numpy as np
+import logging
 
-# Define paths
-MODEL_PATH = os.path.abspath("best (2).pt")
-IMG_PATH = os.path.abspath("uploads/strelka-street-fight.jpg")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-print(f"Loading model from: {MODEL_PATH}")
-model = YOLO(MODEL_PATH)
+VIOLENCE_MODEL_PATH = "best (2).pt"
 
-print(f"Loading image from: {IMG_PATH}")
-if not os.path.exists(IMG_PATH):
-    raise FileNotFoundError(f"Image not found at {IMG_PATH}")
-
-# Run inference
-print("Running inference...")
-results = model.predict(source=IMG_PATH, imgsz=224, save=True, project="runs/predict", name="exp")
-res = results[0]
-
-# Extract probabilities and names robustly
-probs = None
-top1_idx = None
-top1_conf = None
-
-if hasattr(res, "probs"):
-    # Ultralytics Probs object
-    p = res.probs
-    # top1 index and confidence
-    if hasattr(p, "top1"):
-        top1_idx = int(p.top1)
-    if hasattr(p, "top1conf"):
-        top1_conf = float(p.top1conf)
-    
-    # convert probs to numpy if needed
+def test_violence_model():
     try:
-        probs = p.cpu().numpy()
-    except Exception:
-        try:
-            probs = p.numpy()
-        except Exception:
-            probs = None
-else:
-    print("WARNING: res.probs is missing. Checking other attributes...")
-    # Fallback logic if needed, but for classification models probs should be there.
+        logger.info(f"Loading violence model from {VIOLENCE_MODEL_PATH}")
+        model = YOLO(VIOLENCE_MODEL_PATH)
+        logger.info(f"Model loaded. Classes: {model.names}")
+        
+        # Create a dummy image (black)
+        import numpy as np
+        dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
+        
+        logger.info("Running prediction on dummy image...")
+        results = model.predict(dummy_img, imgsz=224, verbose=True)
+        
+        if results:
+            res = results[0]
+            logger.info(f"Result type: {type(res)}")
+            
+            if hasattr(res, "probs"):
+                p = res.probs
+                logger.info(f"Probs object: {p}")
+                
+                if hasattr(p, "top1"):
+                    logger.info(f"Top1 Index: {p.top1}")
+                    logger.info(f"Top1 Conf: {p.top1conf}")
+                    
+                    if hasattr(res, "names"):
+                        logger.info(f"Top1 Label: {res.names[int(p.top1)]}")
+                else:
+                    logger.warning("Probs object has no top1 attribute")
+            else:
+                logger.warning("Result has no probs attribute (Is this a detection model instead of classification?)")
+                
+                # Check for boxes if it's a detection model
+                if hasattr(res, "boxes"):
+                    logger.info(f"Boxes: {res.boxes}")
+                    
+    except Exception as e:
+        logger.error(f"Error: {e}")
 
-# Get class names
-names = res.names if hasattr(res, "names") else None
-if names is None:
-    raise RuntimeError("Class names not found on result object.")
-
-# If top1_idx not available (edge case), compute from probs array
-if top1_idx is None and probs is not None:
-    if hasattr(probs, "data"):
-         arr = probs.data.cpu().numpy().ravel()
-    else:
-         arr = np.array(probs).ravel()
-    top1_idx = int(arr.argmax())
-    top1_conf = float(arr[top1_idx])
-
-if top1_idx is not None:
-    top1_label = names[top1_idx]
-    print("\n=== PREDICTION ===")
-    print("Top-1 class:", top1_label)
-    print("Confidence :", round(top1_conf, 4))
-else:
-    print("\n=== PREDICTION FAILED ===")
-    print("Could not determine top1 class.")
-
-print(f"Annotated image saved to: {res.save_dir}")
+if __name__ == "__main__":
+    test_violence_model()
